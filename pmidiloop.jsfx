@@ -1,0 +1,516 @@
+desc:pmidiloop
+
+import cookdsp.jsfx-inc
+import ui/ui-lib.jsfx-inc
+
+slider1:0<0,16,1>out channel (0 to leave unchanged)
+
+// ==================================================================================================
+@init
+// ==================================================================================================
+// const
+STATE_INITIAL=0;
+STATE_PRE_RECORD=1;
+STATE_RECORD=2;
+STATE_OVERDUB=3;
+STATE_PLAY=4;
+STATE_PAUSE=5;
+
+// var
+state = STATE_INITIAL;
+
+segmentStart = -1;
+segmentEnd = -1;
+nLayers=0;
+curRecordingLayer=-1;
+playlastPosition = 0;
+mapChannel=0;
+layerMemBase = 10000;
+layerMemSize = 4;
+eventsMemBase = 20000;
+
+loopQuantize = 0;
+noteQuantize = 0;
+
+minNote = 48;
+maxNote = 72;
+relativePosition;
+
+msgtime=0;
+
+function mod(a,b) local(n)(
+	n = floor(a/b);
+	a-n*b;
+);
+
+function quantize(beat, resolution) (
+	resolution>0 ? floor(beat/resolution+.5)*resolution : beat;
+);
+
+function showmsg(msg) (
+	strcpy(101, msg);
+	msgtime=1;
+); 
+
+function newLayer()(
+	curRecordingLayer += 1;
+	recLayerPtr = layerMemBase+layerMemSize*curRecordingLayer;
+	recLayerPtr[0] = eventInsertionPointer; // events start
+	recLayerPtr[1] = 0; // count
+	recLayerPtr[2] = 1; // enabled
+	curRecordingLayer;
+);
+
+function startOverdub() (
+
+	state=STATE_OVERDUB;
+	newLayer();
+	showmsg("OVERDUB");
+);
+
+function startRecord() local(s) ( 
+	state=STATE_RECORD;
+	segmentStart = quantize(beat_position, loopResolution);
+	segmentLen = 0;
+	eventInsertionPointer=eventsMemBase;
+	nLayers=0;
+	curRecordingLayer = -1;
+	playlastPosition = 0;
+	newLayer();
+	showmsg("RECORD STARTED");
+);
+
+function startPrerecord(mode) (
+	state=STATE_PRE_RECORD;
+	preRecordInsertFirstNote = mode;
+	showmsg("WAITING FOR MIDI");
+);
+
+function insert(m1,m2,m3) local(t) ( 
+	t = beat_position-segmentStart;
+	segmentLen>0 ? t=mod(t,segmentLen);
+	t=quantize(t, noteResolution);
+
+	state == STATE_OVERDUB ? t = mod(t, segmentLen);
+
+	lastInsertion>0 && t<lastInsertion ? (
+		dummy;
+		// rewind occurred
+		//newLayer();
+	);
+
+	eventInsertionPointer[0] = t; 
+	eventInsertionPointer[1] = m1;
+	eventInsertionPointer[2] = m2;
+	eventInsertionPointer[3] = m3;
+	eventInsertionPointer += 4;
+	lastInsertion = t;
+	recLayerPtr[1] += 1; // count
+	curLayerCount += 1;
+);
+
+function midithru() local(offset,msg1,msg2,msg3,cmd,isNoteOn) (
+	
+	while (midirecv(offset,msg1,msg2,msg3)) ( 
+		cmd = msg1 & 0xF0;
+		cmd!=0xf0 ? (
+			cmd==0x90?(
+				minNote = min(minNote,msg2); 
+				maxNote = max(maxNote,msg2);
+			);
+			mapChannel>0 ? msg1=cmd+(mapChannel-1);
+			a000_midisend=a000_midisend+1;
+			midisend(offset,msg1,msg2,msg3); // passthrough
+			state==STATE_RECORD || state==STATE_OVERDUB ? insert(msg1, msg2, msg3);
+			isNoteOn = cmd==0x90 && msg3>0;
+			isNoteOn ? (
+				state==STATE_PRE_RECORD ? (
+					startRecord();
+					preRecordInsertFirstNote ? insert(msg1, msg2, msg3);
+				);
+			);
+		);
+	);
+);
+
+function playFromTo(from, to) local(nLayers,layer,lptr,t) (
+	layer=0;
+	while(layer <=curRecordingLayer)(
+		lptr = layerMemBase+layerMemSize*layer;
+		evptr = lptr[0];
+		n = lptr[1];
+		loop(n,
+			t = evptr[0];
+			(t>=from) && (t<to) ? midisend(0, evptr[1], evptr[2], evptr[3]); 
+			evptr+=4;
+		);
+		layer+=1;
+	);
+);
+
+function doPlay() local(t, len) (
+	play_state==1 && (state==STATE_PLAY  || state==STATE_OVERDUB) ? (
+		t = beat_position - segmentStart;
+		t = mod(t, segmentLen);
+		playLastPosition>t ? (
+			playFromTo(playLastPosition, segmentLen);
+			playFromTo(0, t);
+		) : (
+			playFromTo(playLastPosition, t);
+		);
+		playLastPosition = t;
+	);
+);
+
+function stopRecord() local(s) (
+	s = state;
+	s==STATE_RECORD ? (
+		state=STATE_PLAY;
+		segmentEnd = quantize(beat_position, loopResolution);
+		segmentLen = segmentEnd - segmentStart;
+		showmsg("PLAY");
+	);
+	s==STATE_OVERDUB ? (
+		state = STATE_PLAY;
+		showmsg("PLAY");
+	);
+	s==STATE_PRE_RECORD ? (
+		state = STATE_INITIAL;
+	);
+);
+
+function sendAllNotesOff() local(chan, key) (
+	showmsg("ALL NOTES OFF");
+	chan=0;
+	loop(16,
+		midisend(0,0xB0+chan,123,0);
+		chan+=1;
+	);
+	chan=0;
+	loop(16,
+		key=0;
+		loop(128,
+			midisend(0,0x80+chan,key,0);
+			key +=1;
+		);
+		chan+=1;
+	);
+);
+
+function togglePause() local(s) (
+	s = state;
+	s==STATE_PLAY ? ( playLastPosition=0; state=STATE_PAUSE; );
+	s==STATE_PAUSE ? ( playLastPosition=0; state=STATE_PLAY;  );
+);
+
+function undoNote() ( dummy; );
+function undoLayer() ( dummy; );
+function doReset() (dummy);
+
+
+GET_SUBSTRING_TMP = 200;
+
+function getChannelLabel(ch) (
+	strcpy_substr(GET_SUBSTRING_TMP,"==1 2 3 4 5 6 7 8 9 10111213141516", ch*2, 2);
+	GET_SUBSTRING_TMP;
+);
+
+function getLQLabel(lq) (
+	strcpy_substr(GET_SUBSTRING_TMP,"none  1 BAR 2Q    2Q t  2Q d  1Q    1Q t  1Q d  1/2   1/2 t 1/2 d 1/4   1/4 t 1/4 d 1/8   1/8 t 1/8 d 1/16  1/16 t1/16 d1/32  1/32 t1/32 d", lq*6, 6);
+	GET_SUBSTRING_TMP;
+);
+
+
+
+
+function getNQLabel(nq) (
+	strcpy_substr(GET_SUBSTRING_TMP,"none  1Q    1Q t  1Q d  1/2   1/2 t 1/2 d 1/4   1/4 t 1/4 d 1/8   1/8 t 1/8 d 1/16  1/16 t1/16 d1/32  1/32 t1/32 d", nq*6, 6);
+	GET_SUBSTRING_TMP;
+);
+
+
+function getStatusLabel(s) (
+	strcpy_substr(GET_SUBSTRING_TMP,"INITIAL   PRE RECORDRECORD    OVERDUB   PLAY      PAUSE     ", s*10, 10);
+	GET_SUBSTRING_TMP;
+);
+
+
+function getResolutionFromLabel(str) local(i,len,ret) (
+	isDot = isNone = isTriplet = isFraction = isBar = has1 = has2 = has3 = has4 = has8 = has6 = 0; 
+	len = strlen(str);
+	i=0;
+	while(i<len)(
+		ch = str_getchar(str, i);
+		ch=='.' || ch=='d' || ch=='D' ? isDot = 1;
+		ch=='b' || ch=='B' ? isBar = 1;
+		ch=='n' || ch=='N' ? isNone = 1;
+		ch=='t' || ch=='T' ? isTriplet = 1;
+		ch == '/' ? isFraction = 1;
+		ch == '1' ? has1 = 1;     ch == '2' ? has2 = 1;
+		ch == '3' ? has3 = 1;     ch == '4' ? has4 = 1;
+		ch == '6' ? has6 = 1;     ch == '8' ? has8 = 1;
+		i+=1;
+	);
+	isNone ? ret = 0;
+	isBar ? ret = ts_num*4/ts_denom; // in quartes
+	has2 && !isFraction ? ret = 2;
+	has1 && !isFraction&& !isBar ? ret = 1;
+	has2 && isFraction && !has3 ? ret = 1/2;
+	has4 ? ret = 1/4;
+	has8 ? ret = 1/8;
+	has6 ? ret = 1/16;
+	has2 && has3 ? ret = 1/32;
+	
+	isDot ? ret += ret/2;
+	isTriplet ? ret=ret*2/3;
+	ret = ret*ts_denom/4; // in beats
+	invResolution = ret>0 ? 1/ret : 0; // debug
+	ret;
+);
+
+
+
+oldwidth=-1;
+oldheight=-1;
+
+function drawBars(band, left, top, width, height) local(buf,target,w,x,lptr,evptr,n,t) (
+	
+	target = gfx_dest;
+	buf=55;
+	gfx_w!=oldwidth || gfx_h!=oldheight ? (
+		oldwidth=gfx_w;
+		oldheight=gfx_h;
+		gfx_setimgdim(buf, gfx_w, gfx_h);
+	);
+	gfx_dest=buf;
+	gfx_a=1;
+	gfx_rect(left,top,width,height);
+
+	w = segmentLen;
+	w==0 ? (
+		w = beat_position-segmentStart;
+		loopResolution>0?w=loopResolution*(1+floor(w/loopResolution));
+	);
+
+	segmentLen >0 ? ( // play cursor
+		x = mod(beat_position-segmentStart, segmentLen)*width/segmentLen;
+		gfx_set(1,0,0);
+		gfx_rect(left+x, top, 1,height);
+	);
+
+	// notes
+	gfx_set(1,1,1);
+	lptr = layerMemBase+layerMemSize*band;
+	evptr = lptr[0];
+	n = lptr[1];
+	minn = minNote-4;
+	maxn = maxNote+4;
+	
+	loop(n,
+		t = evptr[0];
+		evptr[1]&0xf0==0x90 ? (
+			x = t*width/w;
+			y = 1-(evptr[2]-minn)/(maxn-minn);
+			y = y*height;
+			gfx_rect(left+x, y+top-1, 2,2);
+		);
+		evptr+=4;
+	);
+	gfx_dest=target;
+	gfx_blit(buf, 1, 0, 
+		left, top, width, height, 
+		left, top, width, height); 
+);
+
+function do_ui() local(s) (
+	s = state;
+	ui_start("main");
+	//right
+	ui_split_top(70);
+		ui_split_leftratio(60/100);
+			// buttons
+			ui_split_topratio(1/4);
+				ui_split_leftratio(.25);
+					ui_pad(3,1);
+					STARTED==STATE_INITIAL ? (
+						ui_align(1, 0.5);
+						ui_text("REC start");
+					);
+				ui_split_next();
+					ui_pad(3,1);
+					control_button("now", s==STATE_INITIAL) ? startRecord();
+				ui_split_next();
+					ui_pad(3,1);
+					control_button("1st note", state==STATE_INITIAL) ? startPrerecord(1);
+				ui_split_next();
+					ui_pad(3,1);
+					control_button("2nd note", s==STATE_INITIAL) ? startPrerecord(0);
+				ui_pop();
+			ui_split_next();
+				ui_split_leftratio(.25);
+				ui_split_next();
+					ui_pad(3,1);
+					control_button("PLAY", s==STATE_RECORD || s==STATE_OVERDUB || s==STATE_PRE_RECORD) ? stopRecord();
+				ui_split_next();
+					ui_pad(3,1);
+					control_button("OVERDUB", s==STATE_RECORD || s==STATE_PLAY) ? startOverdub();
+				ui_split_next();
+					ui_pad(3,1);
+					control_button("PAUSE", s==STATE_PLAY) ? togglePause();
+				ui_pop();
+			ui_split_next();
+				ui_split_leftratio(.25);
+					ui_pad(3,1);
+					ui_align(1, 0.5);
+					ui_text("UNDO");
+				ui_split_next();
+					ui_pad(3,1);
+					control_button("NOTE", s==STATE_PLAY || s==STATE_OVERDUB) ? undoNote();
+				ui_split_next();
+					ui_pad(3,1);
+					control_button("LAYER", s==STATE_PLAY) ? undoLayer();
+				ui_split_next();
+					ui_pad(3,1);
+					control_button("ALL", 1)  ? doReset();
+				ui_pop();
+			// ui_split_next();
+			//      ui_split_leftratio(.5);
+			//           ui_pad(3,1);
+			//           control_button("N OFF", 1)  ? sendAllNotesOff();
+			//      ui_split_next();
+			//           ui_pad(3,1);
+			//           control_button("PAUSE", 1) ? togglePause();
+			//      ui_pop();
+			ui_pop();
+		ui_split_next(); // right
+			ui_split_topratio(2/3); //right top
+				// selectors
+				ui_split_leftratio(1/3);
+					ui_pad(1,1);
+					ui_split_top(15);
+						ui_text("out chan");
+					ui_pop();
+						v = mapChannel;
+						v1=min(v+1, 16);
+						v2=max(v-1,0);
+						v = control_selector(v, getChannelLabel(v), v1,v2);
+						slider1 = mapChannel = v;
+						sliderchange(1);
+				ui_split_next();
+					ui_pad(1,1);
+					ui_split_top(15);
+						ui_text("loop Q");
+					ui_pop();
+						v = loopQuantize;
+						v1=min(v+1, 22);
+						v2=max(v-1,0);
+						v = control_selector(v, getLQLabel(v), v1, v2);
+						v != loopQuantize ? (
+							loopQuantize = v;
+							loopResolution = getResolutionFromLabel(getLQLabel(v));
+						);
+				ui_split_next();
+					ui_pad(1,1);
+					ui_split_top(15);
+						ui_text("note Q");
+					ui_pop();
+						v = noteQuantize;
+						v1 = min(v+1, 18);
+						v2 = max(v-1,0);
+						v = control_selector(v, getNQLabel(v), v1, v2);
+						v != noteQuantize ? (
+							noteQuantize = v;
+							noteResolution = getResolutionFromLabel(getNQLabel(v));
+						);
+				ui_pop();
+			ui_pop();
+				ui_text(getStatusLabel(state));
+		ui_pop();
+	ui_pop();
+
+	ui_push_clip();
+		ui_color(0,0,0,1);
+		ui_fill();
+
+		state != STATE_INITIAL ? (
+			nband = curRecordingLayer+1;
+			ui_split_topratio(1/nband);
+			band=0;
+			loop(nband,
+				ui_pad(2,2);
+				ui_color(0,0,64);
+				(state==STATE_RECORD || state==STATE_OVERDUB) &&  band==curRecordingLayer ? ui_color(128,0,0);
+				ui_fill(); 
+
+				drawBars(band, ui_left(), ui_top(), ui_width(), ui_height());
+			
+				ui_split_next();
+				band+=1;
+			);
+			ui_pop();
+		);
+		// graphWidth = ui_width();
+		// graphHeight = ui_height();
+		// graphLeft = ui_left();
+		// graphTop = ui_top();
+		// graphRight = ui_right();
+		// graphBottom = ui_bottom();
+		//drawBars(ui_left(), ui_top(), ui_width(), ui_height());
+	ui_pop();
+
+);
+
+loopResolution = getResolutionFromLabel(getLQLabel(loopQuantize));
+noteResolution = getResolutionFromLabel(getLQLabel(noteQuantize));
+
+ui_setup(7000000);
+
+//==================================================================================================
+@slider
+//==================================================================================================
+mapChannel=slider1;
+
+
+//==================================================================================================
+@block
+//==================================================================================================
+
+state!=STATE_INITIAL ? (
+	relativePosition = beat_position-segmentStart;
+	segmentLen>0 ? relativePosition = mod(relativePosition, segmentLen);
+) : relativePosition = -1;
+
+
+midithru();
+doPlay();
+
+//==================================================================================================
+@sample
+//==================================================================================================
+
+//==================================================================================================
+@gfx 100 100
+//==================================================================================================
+
+
+function drawmsg() local(w,h,x,y,a)(
+	msgtime>0 ?(
+		a = min(msgtime*(1-msgtime)*5, 1);
+		savefont = gfx_getfont();
+		gfx_setfont(1,"Arial", 24);
+		gfx_measurestr(101,w,h);
+		x = (gfx_w-w)/2;
+		y = (gfx_h-h)/2;
+		gfx_set(1,1,1,a);
+		gfx_rect(x-15,y-5,w+30,h+10);
+		gfx_set(0,0,0,a);
+		gfx_x=x;
+		gfx_y=y;
+		gfx_drawstr(101,1+4,x+w,y+h); 
+		gfx_setfont(savefont);
+		msgtime -= .05;
+	);
+);
+
+do_ui();
+drawmsg();
