@@ -1,7 +1,7 @@
 desc:pmidiloop
 
-import cookdsp.jsfx-inc
-import ui/ui-lib.jsfx-incw
+//import cookdsp.jsfx-inc
+import ui/ui-lib.jsfx-inc
 
 slider1:0<0,16,1>-out channel
 slider2:0<0,10,1>-loopQuantize
@@ -19,6 +19,11 @@ STATE_OVERDUB=3;
 STATE_PLAY=4;
 STATE_PAUSE=5;
 
+MUTE_STATE_UNMUTE = 0;
+MUTE_STATE_MUTE = 1;
+MUTE_STATE_ARMED_FOR_MUTE = 2;
+MUTE_STATE_ARMED_FOR_UNMUTE = 3;
+
 // var
 state = STATE_INITIAL;
 
@@ -35,7 +40,7 @@ eventsMemBase = 20000;
 mapChannel=slider1;
 loopQuantize=slider2;
 noteQuantize=slider3;
-midiThru=slider4;
+midiThruEnabled=slider4;
 
 minNote = 48;
 maxNote = 72;
@@ -68,7 +73,7 @@ function newLayer() local (needed, ptr)(
 		recLayerPtr = layerMemBase+layerMemSize*curRecordingLayer;
 		recLayerPtr[0] = eventInsertionPointer; // events start
 		recLayerPtr[1] = 0; // count
-		recLayerPtr[2] = 1; // enabled
+		recLayerPtr[2] = MUTE_STATE_UNMUTE;
 	);
 	curRecordingLayer;
 );
@@ -105,12 +110,6 @@ function insert(m1,m2,m3) local(t) (
 
 	state == STATE_OVERDUB ? t = mod(t, segmentLen);
 
-	lastInsertion>0 && t<lastInsertion ? (
-		dummy;
-		// rewind occurred
-		//newLayer();
-	);
-
 	eventInsertionPointer[0] = t; 
 	eventInsertionPointer[1] = m1;
 	eventInsertionPointer[2] = m2;
@@ -131,30 +130,30 @@ function midithru() local(offset,msg1,msg2,msg3,cmd,isNoteOn) (
 				maxNote = max(maxNote,msg2);
 			);
 			mapChannel>0 ? msg1=cmd+(mapChannel-1);
-			a000_midisend=a000_midisend+1;
 			midisend(offset,msg1,msg2,msg3); // passthrough
 			state==STATE_RECORD || state==STATE_OVERDUB ? insert(msg1, msg2, msg3);
 			isNoteOn = cmd==0x90 && msg3>0;
-			isNoteOn ? (
-				state==STATE_PRE_RECORD ? (
-					startRecord();
-					preRecordInsertFirstNote ? insert(msg1, msg2, msg3);
-				);
+			isNoteOn &&     state==STATE_PRE_RECORD ? (
+				startRecord();
+				preRecordInsertFirstNote ? insert(msg1, msg2, msg3);
 			);
 		);
 	);
 );
 
-function playFromTo(from, to) local(nLayers,layer,lptr,t) (
+function playFromTo(from, to) local(nLayers,layer,lptr,t,mutestate) (
 	layer=0;
 	while(layer <=curRecordingLayer)(
 		lptr = layerMemBase+layerMemSize*layer;
 		evptr = lptr[0];
 		n = lptr[1];
-		loop(n,
-			t = evptr[0];
-			(t>=from) && (t<to) ? midisend(0, evptr[1], evptr[2], evptr[3]); 
-			evptr+=4;
+		mutestate= lptr[2];
+		mutestate == MUTE_STATE_UNMUTE || mutestate == MUTE_STATE_ARMED_FOR_MUTE ? (
+			loop(n,
+				t = evptr[0];
+				(t>=from) && (t<to) ? midisend(0, evptr[1], evptr[2], evptr[3]); 
+				evptr+=4;
+			);
 		);
 		layer+=1;
 	);
@@ -332,7 +331,7 @@ function drawBars(band, left, top, width, height) local(buf,target,w,x,lptr,evpt
 		left, top, width, height); 
 );
 
-function do_ui() local(s) (
+function do_ui() local(s,ptr,mutestate, muted, armed, recording,v) (
 	s = state;
 	ui_start("main");
 	//right
@@ -383,14 +382,6 @@ function do_ui() local(s) (
 					ui_pad(3,1);
 					control_button("ALL", 1)  ? doReset();
 				ui_pop();
-			// ui_split_next();
-			//      ui_split_leftratio(.5);
-			//           ui_pad(3,1);
-			//           control_button("N OFF", 1)  ? sendAllNotesOff();
-			//      ui_split_next();
-			//           ui_pad(3,1);
-			//           control_button("PAUSE", 1) ? togglePause();
-			//      ui_pop();
 			ui_pop();
 		ui_split_next(); // right
 			ui_split_topratio(1/4); 
@@ -443,17 +434,44 @@ function do_ui() local(s) (
 	ui_pop();
 
 	ui_push_clip();
-		ui_color(0,0,0,1);
-		ui_fill();
 
 		state != STATE_INITIAL ? (
 			nband = curRecordingLayer+1;
 			ui_split_topratio(1/nband);
+
 			band=0;
 			loop(nband,
+				ptr = layerMemBase+layerMemSize*band;
+				mutestate = ptr[2];
+				muted = mutestate==MUTE_STATE_MUTE || mutestate==MUTE_STATE_ARMED_FOR_UNMUTE;
+				armed = mutestate==MUTE_STATE_ARMED_FOR_MUTE || mutestate==MUTE_STATE_ARMED_FOR_UNMUTE;
+				recording = (state==STATE_RECORD || state==STATE_OVERDUB) &&  band==curRecordingLayer;
+
+				ui_split_left(100);
+					ui_split_top(20);
+						ui_split_leftratio(1/3);
+							armed ? ui_color(255,0,0,1) : ui_color(0,0,0,1); 
+							ui_text(muted?"PLAY":"MUTE");
+						ui_split_next();
+							ui_pad(1,0);
+							control_button("now", mutestate==MUTE_STATE_MUTE || mutestate==MUTE_STATE_UNMUTE) ? (
+								ptr[2] = mutestate = muted ? MUTE_STATE_UNMUTE : MUTE_STATE_MUTE;
+							);
+						ui_split_next();
+							ui_pad(1,0);
+							control_button("next", 1) ? ( 
+								armed ? (
+									ptr[2] = mutestate = muted ? MUTE_STATE_MUTE : MUTE_STATE_UNMUTE;
+								) : (
+									ptr[2] = mutestate = muted ? MUTE_STATE_ARMED_FOR_UNMUTE : MUTE_STATE_ARMED_FOR_MUTE;
+								)
+							);
+						ui_pop();
+					ui_pop();
+				ui_pop();
 				ui_pad(2,2);
-				ui_color(0,0,64);
-				(state==STATE_RECORD || state==STATE_OVERDUB) &&  band==curRecordingLayer ? ui_color(128,0,0);
+				!muted ? ui_color(0,0,64) : ui_color(64,64,64);
+				recording ? ui_color(128,0,0);
 				ui_fill(); 
 
 				drawBars(band, ui_left(), ui_top(), ui_width(), ui_height());
@@ -463,15 +481,24 @@ function do_ui() local(s) (
 			);
 			ui_pop();
 		);
-		// graphWidth = ui_width();
-		// graphHeight = ui_height();
-		// graphLeft = ui_left();
-		// graphTop = ui_top();
-		// graphRight = ui_right();
-		// graphBottom = ui_bottom();
-		//drawBars(ui_left(), ui_top(), ui_width(), ui_height());
 	ui_pop();
 
+);
+
+function onRewind() local(nlayer,layer,ptr,s) (
+	a00_rewind+=1;
+	state==STATE_PLAY || state==STATE_OVERDUB ? (
+		nlayer = curRecordingLayer+1;
+
+		layer=0;
+		loop(nlayer,
+			ptr = layerMemBase+layerMemSize*layer;
+			s = ptr[2];
+			s == MUTE_STATE_ARMED_FOR_MUTE ? ptr[2] = MUTE_STATE_MUTE;
+			s == MUTE_STATE_ARMED_FOR_UNMUTE ? ptr[2] = MUTE_STATE_UNMUTE;
+			layer+=1;
+		);
+	);
 );
 
 loopResolution = getResolutionFromLabel(getLQLabel(loopQuantize));
@@ -490,12 +517,18 @@ noteQuantize=slider3;
 @block
 //==================================================================================================
 
+rewind=0;
+beat_position<old_beat_position? rewund=1;
+old_beat_position = beat_position;
+
 state!=STATE_INITIAL ? (
 	relativePosition = beat_position-segmentStart;
 	segmentLen>0 ? relativePosition = mod(relativePosition, segmentLen);
 ) : relativePosition = -1;
+relativePosition<old_relativePosition ? rewind=1;
+old_relativePosition=relativePosition;
 
-
+rewind?onRewind();
 midithru();
 doPlay();
 
