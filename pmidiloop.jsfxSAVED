@@ -1,12 +1,9 @@
 desc:pmidiloop
 
 import cookdsp.jsfx-inc
-import ui/ui-lib.jsfx-incw
+import ui/ui-lib.jsfx-inc
 
-slider1:0<0,16,1>-out channel
-slider2:0<0,10,1>-loopQuantize
-slider3:0<0,15,1>-noteQuantize
-slider4:0<0,1,1>midiThru
+slider1:0<0,16,1>out channel (0 to leave unchanged)
 
 // ==================================================================================================
 @init
@@ -32,10 +29,8 @@ layerMemBase = 10000;
 layerMemSize = 4;
 eventsMemBase = 20000;
 
-mapChannel=slider1;
-loopQuantize=slider2;
-noteQuantize=slider3;
-midiThru=slider4;
+loopQuantize = 0;
+noteQuantize = 0;
 
 minNote = 48;
 maxNote = 72;
@@ -57,19 +52,12 @@ function showmsg(msg) (
 	msgtime=1;
 ); 
 
-function newLayer() local (needed, ptr)(
-	needed=1;
-	curRecordingLayer>=0 ? (
-		ptr = layerMemBase+layerMemSize*curRecordingLayer;
-		needed=ptr[1]>0; // not empty
-	);
-	needed ? (
-		curRecordingLayer += 1;
-		recLayerPtr = layerMemBase+layerMemSize*curRecordingLayer;
-		recLayerPtr[0] = eventInsertionPointer; // events start
-		recLayerPtr[1] = 0; // count
-		recLayerPtr[2] = 1; // enabled
-	);
+function newLayer()(
+	curRecordingLayer += 1;
+	recLayerPtr = layerMemBase+layerMemSize*curRecordingLayer;
+	recLayerPtr[0] = eventInsertionPointer; // events start
+	recLayerPtr[1] = 0; // count
+	recLayerPtr[2] = 1; // enabled
 	curRecordingLayer;
 );
 
@@ -228,7 +216,7 @@ function getChannelLabel(ch) (
 );
 
 function getLQLabel(lq) (
-	strcpy_substr(GET_SUBSTRING_TMP,"none  1 BAR 1/2   1/2 t 1/2 d 1/4   1/4 t 1/4 d 1/8   1/8 t 1/8 d ", lq*6, 6);
+	strcpy_substr(GET_SUBSTRING_TMP,"none  1 BAR 2Q    2Q t  2Q d  1Q    1Q t  1Q d  1/2   1/2 t 1/2 d 1/4   1/4 t 1/4 d 1/8   1/8 t 1/8 d 1/16  1/16 t1/16 d1/32  1/32 t1/32 d", lq*6, 6);
 	GET_SUBSTRING_TMP;
 );
 
@@ -236,7 +224,7 @@ function getLQLabel(lq) (
 
 
 function getNQLabel(nq) (
-	strcpy_substr(GET_SUBSTRING_TMP,"none  1/2   1/2 t 1/2 d 1/4   1/4 t 1/4 d 1/8   1/8 t 1/8 d 1/16  1/16 t1/16 d1/32  1/32 t1/32 d", nq*6, 6);
+	strcpy_substr(GET_SUBSTRING_TMP,"none  1Q    1Q t  1Q d  1/2   1/2 t 1/2 d 1/4   1/4 t 1/4 d 1/8   1/8 t 1/8 d 1/16  1/16 t1/16 d1/32  1/32 t1/32 d", nq*6, 6);
 	GET_SUBSTRING_TMP;
 );
 
@@ -264,16 +252,18 @@ function getResolutionFromLabel(str) local(i,len,ret) (
 		i+=1;
 	);
 	isNone ? ret = 0;
-	isBar ? ret = ts_num*4/ts_denom; // in wholes
-	has2 && isFraction && !has3 ? ret = 1/8;
+	isBar ? ret = ts_num*4/ts_denom; // in quartes
+	has2 && !isFraction ? ret = 2;
+	has1 && !isFraction&& !isBar ? ret = 1;
+	has2 && isFraction && !has3 ? ret = 1/2;
 	has4 ? ret = 1/4;
 	has8 ? ret = 1/8;
-	has1 && has6 ? ret = 1/16;
-	has3 && has2 ? ret = 1/32;
+	has6 ? ret = 1/16;
+	has2 && has3 ? ret = 1/32;
 	
 	isDot ? ret += ret/2;
 	isTriplet ? ret=ret*2/3;
-	ret = ret*ts_denom; // in beats
+	ret = ret*ts_denom/4; // in beats
 	invResolution = ret>0 ? 1/ret : 0; // debug
 	ret;
 );
@@ -393,52 +383,48 @@ function do_ui() local(s) (
 			//      ui_pop();
 			ui_pop();
 		ui_split_next(); // right
-			ui_split_topratio(1/4); 
+			ui_split_topratio(2/3); //right top
 				// selectors
-				ui_split_leftratio(1/4);
+				ui_split_leftratio(1/3);
 					ui_pad(1,1);
-					ui_text("OUT CH");
-				ui_pop();
-				ui_split_leftratio(2/3);
-					v = control_slider_x(mapChannel, 0, 16, 0, 0);
-					v = floor(v+.5);
-					slider1 = mapChannel = v;
-					sliderchange(1);
-				ui_pop();
-				ui_text(getChannelLabel(v));
-			ui_split_next();
-				ui_split_leftratio(1/4);
+					ui_split_top(15);
+						ui_text("out chan");
+					ui_pop();
+						v = mapChannel;
+						v1=min(v+1, 16);
+						v2=max(v-1,0);
+						v = control_selector(v, getChannelLabel(v), v1,v2);
+						slider1 = mapChannel = v;
+						sliderchange(1);
+				ui_split_next();
 					ui_pad(1,1);
-					ui_text("LOOP Q");
-				ui_pop();
-				ui_split_leftratio(2/3);
-					v = control_slider_x(loopQuantize, 0, 10, 0, 0);
-					v = floor(v+.5);
-					v != loopQuantize ? (
-						loopQuantize = slider2 = v;
-						loopResolution = getResolutionFromLabel(getLQLabel(v));
-						sliderchange(2);
-					);
-				ui_pop();
-				ui_text(getLQLabel(v));
-			ui_split_next();
-				ui_split_leftratio(1/4);
+					ui_split_top(15);
+						ui_text("loop Q");
+					ui_pop();
+						v = loopQuantize;
+						v1=min(v+1, 22);
+						v2=max(v-1,0);
+						v = control_selector(v, getLQLabel(v), v1, v2);
+						v != loopQuantize ? (
+							loopQuantize = v;
+							loopResolution = getResolutionFromLabel(getLQLabel(v));
+						);
+				ui_split_next();
 					ui_pad(1,1);
-					ui_text("NOTE Q");
+					ui_split_top(15);
+						ui_text("note Q");
+					ui_pop();
+						v = noteQuantize;
+						v1 = min(v+1, 18);
+						v2 = max(v-1,0);
+						v = control_selector(v, getNQLabel(v), v1, v2);
+						v != noteQuantize ? (
+							noteQuantize = v;
+							noteResolution = getResolutionFromLabel(getNQLabel(v));
+						);
 				ui_pop();
-				ui_split_leftratio(2/3);
-					v = control_slider_x(noteQuantize, 0, 15, 0, 0);
-					v = floor(v+.5);
-					v != noteQuantize ? (
-						noteQuantize = slider3 = v;
-						noteResolution = getResolutionFromLabel(getNQLabel(v));
-						sliderchange(3);
-					);
-				ui_pop();
-				ui_text(getNQLabel(v));
-
 			ui_pop();
-			ui_text(getStatusLabel(state));
+				ui_text(getStatusLabel(state));
 		ui_pop();
 	ui_pop();
 
@@ -483,8 +469,7 @@ ui_setup(7000000);
 @slider
 //==================================================================================================
 mapChannel=slider1;
-loopQuantize=slider2;
-noteQuantize=slider3;
+
 
 //==================================================================================================
 @block
