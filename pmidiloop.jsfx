@@ -4,8 +4,8 @@ desc:pmidiloop
 import ui/ui-lib.jsfx-inc
 
 slider1:0<0,16,1>-out channel
-slider2:0<0,10,1>-loopQuantize
-slider3:0<0,15,1>-noteQuantize
+slider2:1<0,10,1>-loopQuantize
+slider3:10<0,15,1>-noteQuantize
 slider4:0<0,1,1>-midiThru
 slider5:0<-127,127,1>remote
 
@@ -28,6 +28,9 @@ MUTE_STATE_MUTE = 1;
 MUTE_STATE_ARMED_FOR_MUTE = 2;
 MUTE_STATE_ARMED_FOR_UNMUTE = 3;
 
+layerMemBase = 10000;
+eventsMemBase = 20000;
+
 // strings 
 STR_SHOW_MSG = 101;
 STR_GETLABEL = 102;
@@ -44,9 +47,7 @@ curRecordingLayer=-1;
 playlastPosition = 0;
 lastRemoteTime = 0;
 mapChannel=0;
-layerMemBase = 10000;
 layerMemSize = 4;
-eventsMemBase = 20000;
 learning = 0;
 mapChannel=slider1;
 loopQuantize = slider2;
@@ -57,7 +58,7 @@ remote = slider5;
 minNote = 48;
 maxNote = 72;
 relativePosition;
-
+dumpMode = 0;
 msgtime=0;
 
 function mod(a,b) local(n)(
@@ -75,18 +76,18 @@ function showmsg(msg) (
 	msgtime=1;
 ); 
 
-function newLayer() local (needed, ptr)(
+function newLayer() local (needed, lptr)(
 	needed=1;
 	curRecordingLayer>=0 ? (
-		ptr = layerMemBase+layerMemSize*curRecordingLayer;
-		needed=ptr[1]>0; // not empty
+		lptr = layerMemBase+layerMemSize*curRecordingLayer;
+		needed=lptr[1]>0; // not empty
 	);
 	needed ? (
 		curRecordingLayer += 1;
-		recLayerPtr = layerMemBase+layerMemSize*curRecordingLayer;
-		recLayerPtr[0] = eventInsertionPointer; // events start
-		recLayerPtr[1] = 0; // count
-		recLayerPtr[2] = MUTE_STATE_UNMUTE;
+		lptr = layerMemBase+layerMemSize*curRecordingLayer;
+		lptr[0] = eventInsertionPointer; // events start
+		lptr[1] = 0; // count
+		lptr[2] = MUTE_STATE_UNMUTE;
 	);
 	curRecordingLayer;
 );
@@ -116,7 +117,7 @@ function startPrerecord(mode) (
 	showmsg("WAITING FOR MIDI");
 );
 
-function insert(m1,m2,m3) local(t) ( 
+function insert(m1,m2,m3) local(t, lptr) ( 
 	t = beat_position-segmentStart;
 	segmentLen>0 ? t=mod(t+segmentLen,segmentLen);
 	t=quantize(t, noteResolution);
@@ -128,25 +129,24 @@ function insert(m1,m2,m3) local(t) (
 	eventInsertionPointer[2] = m2;
 	eventInsertionPointer[3] = m3;
 	eventInsertionPointer += 4;
-	lastInsertion = t;
-	recLayerPtr[1] += 1; // count
-	curLayerCount += 1;
+	lptr = layerMemBase+layerMemSize*curRecordingLayer;
+	lptr[1] += 1; // count
 );
 
-function stopRecord() local(s,lptr,evptr,n) (
+function stopRecordAt(pos) local(s,lptr,evptr,n) (
 	s = state;
 	s==STATE_RECORD ? (
 		state=STATE_PLAY;
-		segmentEnd = quantize(beat_position, loopResolution);
+		segmentEnd = quantize(pos, loopResolution);
 		segmentLen = segmentEnd - segmentStart;
 	
-		lptr = layerMemBase+layerMemSize*curRecordingLayer;
-		evptr = lptr[0];
-		n = evptr[1];
-		loop(n,
-			evptr[0] = mod(evptr[0]+segmentLen, segmentLen);
-			evptr+=4;
-		);
+		// lptr = layerMemBase+layerMemSize*curRecordingLayer;
+		// evptr = lptr[0];
+		// n = evptr[1];
+		// loop(n,
+		//      evptr[0] = mod(evptr[0]+segmentLen, segmentLen);
+		//      evptr+=4;
+		// );
 
 		showmsg("PLAY");
 	);
@@ -159,6 +159,11 @@ function stopRecord() local(s,lptr,evptr,n) (
 	);
 );
 
+function stopRecord() (
+	stopRecordAt(beat_position);
+);
+
+
 function midithru() local(offset,s, msg1,msg2,msg3,cmd,isNoteOn, ignore) (
 	ignore=false;
 	now = time_precise();
@@ -167,40 +172,41 @@ function midithru() local(offset,s, msg1,msg2,msg3,cmd,isNoteOn, ignore) (
 		cmd = msg1 & 0xF0;
 		cmd != 0xf0 ? (
 			cmd==0x90?(
-				remote>0 && msg2==remote & msg3>0 && now>lastRemoteTime+1 ? (
-					a000_remote += 1;
-					a000_remote_s1 = s;
-					s==STATE_INITIAL ? startRecord();
-					a000_remote_s2 = s;
-					s==STATE_PLAY ? startOverdub();
-					a000_remote_s3 = s;
-					s==STATE_RECORD || s==STATE_OVERDUB ? stopRecord();
-					a000_remote_s4 = s;
-					lastRemoteTime = now; 
+				remote>0 && msg2==remote ? (
 					ignore = true;
-				);
-				minNote = min(minNote,msg2); 
-				maxNote = max(maxNote,msg2);
-				learning ? (
-					learning=0;
-					remote=slider5=msg2;
-					sliderchange(5);
-					lastRemoteTime = now; 
+					now>lastRemoteTime+1 ? (
+						s==STATE_INITIAL ? startRecord();
+						s==STATE_PLAY ? startOverdub();
+						s==STATE_RECORD || s==STATE_OVERDUB ? stopRecord();
+						lastRemoteTime = now; 
+					);
+				) : (
+					minNote = min(minNote,msg2); 
+					maxNote = max(maxNote,msg2);
+					learning ? (
+						learning=0;
+						remote=slider5=msg2;
+						sliderchange(5);
+						lastRemoteTime = now; 
+					);
 				);
 			);
 			cmd==0xb0 ? (
-				remote<0 && msg2==-remote && now>lastRemoteTime+1 ? (
-					s==STATE_INITIAL ? startRecord();
-					s==STATE_PLAY ? startOverdub();
-					s==STATE_RECORD || s==STATE_OVERDUB ? stopRecord(); 
-					ignore = true;
-					lastRemoteTime = now; 
-				);
-				learning ? (
-					learning=0;
-					remote=slider5=-msg2;
-					sliderchange(5);
-					lastRemoteTime = now; 
+				remote<0 && msg2==-remote ? (
+					now>lastRemoteTime+1 ? (
+						ignore = true;
+						s==STATE_INITIAL ? startRecord();
+						s==STATE_PLAY ? startOverdub();
+						s==STATE_RECORD || s==STATE_OVERDUB ? stopRecord(); 
+						lastRemoteTime = now; 
+					);
+				):(
+					learning ? (
+						learning=0;
+						remote=slider5=-msg2;
+						sliderchange(5);
+						lastRemoteTime = now; 
+					);
 				);
 			);
 			mapChannel>0 ? msg1=cmd+(mapChannel-1);
@@ -257,13 +263,28 @@ function doPlay() local(t, len) (
 	play_state==1 && (state==STATE_PLAY  || state==STATE_OVERDUB) ? (
 		t = beat_position - segmentStart;
 		t = mod(t, segmentLen);
-		playLastPosition>t ? (
-			playFromTo(playLastPosition, segmentLen);
-			playFromTo(0, t);
+		playRestarting ? (
+			playRestarting = 0;
+			playFromTo(t, t);
 		) : (
-			playFromTo(playLastPosition, t);
+			playLastPosition>t ? (
+				playFromTo(playLastPosition, segmentLen);
+				playFromTo(0, t);
+			) : (
+				playFromTo(playLastPosition, t);
+			);
 		);
 		playLastPosition = t;
+	);
+
+	dumpMode && isDumping && beat_position>dumpEnd ? dumpMode=isDumping=0;
+
+	play_state==5 && dumpMode ? (
+		t = beat_position - dumpStart;
+		a000_dump_t = t;
+		playFromTo(dumpLastPosition, t);
+		isDumping = 1;
+		dumpLastPosition = t;          
 	);
 );
 
@@ -281,7 +302,7 @@ function undoNote() local(evptr,lptr,n) (
 		n = lptr[1];
 		n>0?(
 			n = lptr[1] = n-1;
-			eventInsertionPointer-=1;
+			eventInsertionPointer-=4;
 		);
 	);
 );
@@ -365,7 +386,23 @@ function getResolutionFromLabel(str) local(i,len,ret) (
 	ret;
 );
 
-
+function armDumpMode(value)  (
+	// 0=stopped, <0=error, 1=playing, 2=paused, 5=recording, 6=record paused
+	value ? (
+		play_state==1 || play_state==5 || segmentLen<=0 
+			? ( // rejected
+				dumpMode=0;
+			)
+			: ( // accepted
+				dumpLastPosition = 0;
+				state = STATE_PLAY;
+				dumpMode = 1;
+			);
+	):(
+		dumpMode = 0;
+	);
+	dumpMode;
+);
 
 oldwidth=-1;
 oldheight=-1;
@@ -414,13 +451,18 @@ function drawBars(band, left, top, width, height) local(buf,target,w,x,lptr,evpt
 		evptr+=4;
 	);
 
-	band==curRecordingLayer ? (
-		ui_color(255,255,255,1);
-		t = eventInsertionPointer==eventsMemBase ? -1 : 0[eventInsertionPointer-4];
+	ui_color(255,255,255,1);
+	gfx_x = left+5;
+	gfx_y = top+10;
+	lptr = layerMemBase+layerMemSize*band;
+	evptr = lptr[0];
+	n = lptr[1];
 
-		sprintf(STR_MONITOR, "start=%f end=%f last=%f", segmentStart, segmentEnd, t);
-		gfx_x = left+15;
-		gfx_y = top+15;
+	band==curRecordingLayer && state==STATE_RECORD ? (
+		sprintf(STR_MONITOR, "start=%f end=%f n=%d first=%f last=%f", segmentStart, segmentEnd, n, evptr[0], evptr[(n-1)*4]);
+		gfx_drawstr(STR_MONITOR); 
+	): (
+		sprintf(STR_MONITOR, "ladr=%d evadr=%d n=%d first=%f last=%f", lptr, evptr, n, evptr[0], evptr[(n-1)*4]);
 		gfx_drawstr(STR_MONITOR); 
 	);
 
@@ -430,7 +472,7 @@ function drawBars(band, left, top, width, height) local(buf,target,w,x,lptr,evpt
 		left, top, width, height); 
 );
 
-function do_ui() local(s,ptr,mutestate, muted, armed, recording,v) (
+function do_ui() local(s,lptr,evptr,mutestate, muted, armed, recording,v) (
 	s = state;
 	ui_start("main");
 	//right
@@ -464,7 +506,7 @@ function do_ui() local(s,ptr,mutestate, muted, armed, recording,v) (
 					control_button("OVERDUB", s==STATE_RECORD || s==STATE_PLAY) ? startOverdub();
 				ui_split_next();
 					ui_pad(3,1);
-					control_button("PAUSE", s==STATE_PLAY) ? togglePause();
+					control_button("PAUSE", 1) ? togglePause();
 				ui_pop();
 			ui_split_next();
 				ui_split_leftratio(.25);
@@ -495,10 +537,17 @@ function do_ui() local(s,ptr,mutestate, muted, armed, recording,v) (
 							sliderchange(4);
 						);
 					ui_pop();
+
+					ui_split_right(30);
+						ui_pad(3,1);
+						v = control_switch(dumpMode?1:0);
+						v != dumpMode ? armDumpMode(v); 
+					ui_pop();
+
 					ui_pad(3,1);
 					ui_align(1, .5);
-					learning ? ui_color(255,0,0,1) : ui_color(0,0,0,1);
-					ui_text("REMOTE");
+					dumpMode ? ui_color(255,0,0,1) : ui_color(0,0,0,1);
+					ui_text("DUMP");
 				ui_split_next();
 					ui_pad(3,1);
 					control_button(getRemoteLabel(), 1)? (
@@ -570,8 +619,8 @@ function do_ui() local(s,ptr,mutestate, muted, armed, recording,v) (
 
 			band=0;
 			loop(nband,
-				ptr = layerMemBase+layerMemSize*band;
-				mutestate = ptr[2];
+				lptr = layerMemBase+layerMemSize*band;
+				mutestate = lptr[2];
 				muted = mutestate==MUTE_STATE_MUTE || mutestate==MUTE_STATE_ARMED_FOR_UNMUTE;
 				armed = mutestate==MUTE_STATE_ARMED_FOR_MUTE || mutestate==MUTE_STATE_ARMED_FOR_UNMUTE;
 				recording = (state==STATE_RECORD || state==STATE_OVERDUB) &&  band==curRecordingLayer;
@@ -584,15 +633,15 @@ function do_ui() local(s,ptr,mutestate, muted, armed, recording,v) (
 						ui_split_next();
 							ui_pad(1,0);
 							control_button("now", mutestate==MUTE_STATE_MUTE || mutestate==MUTE_STATE_UNMUTE) ? (
-								ptr[2] = mutestate = muted ? MUTE_STATE_UNMUTE : MUTE_STATE_MUTE;
+								lptr[2] = mutestate = muted ? MUTE_STATE_UNMUTE : MUTE_STATE_MUTE;
 							);
 						ui_split_next();
 							ui_pad(1,0);
 							control_button("next", 1) ? ( 
 								armed ? (
-									ptr[2] = mutestate = muted ? MUTE_STATE_MUTE : MUTE_STATE_UNMUTE;
+									lptr[2] = mutestate = muted ? MUTE_STATE_MUTE : MUTE_STATE_UNMUTE;
 								) : (
-									ptr[2] = mutestate = muted ? MUTE_STATE_ARMED_FOR_UNMUTE : MUTE_STATE_ARMED_FOR_MUTE;
+									lptr[2] = mutestate = muted ? MUTE_STATE_ARMED_FOR_UNMUTE : MUTE_STATE_ARMED_FOR_MUTE;
 								);
 							);
 						ui_pop();
@@ -614,50 +663,91 @@ function do_ui() local(s,ptr,mutestate, muted, armed, recording,v) (
 
 );
 
-function onRewind() local(nlayer,layer,ptr,s) (
-	a00_rewind+=1;
-	state==STATE_PLAY || state==STATE_OVERDUB ? (
+function onRewind() local(nlayer,layer,lptr,s) (
+	r_rewind+=1;
+	s = state;
+	s==STATE_RECORD ?  (
+		play_state==0 ? (
+			// stavo registrando il primo seg, l'utente ha stoppato
+			stopRecordAt(right_beat_position);
+		):( // loop
+			stopRecordAt(right_beat_position);
+			// aggiustamenti
+		);
+	);
+	s==STATE_PLAY || s==STATE_OVERDUB ? (
 		nlayer = curRecordingLayer+1;
 
 		layer=0;
 		loop(nlayer,
-			ptr = layerMemBase+layerMemSize*layer;
-			s = ptr[2];
-			s == MUTE_STATE_ARMED_FOR_MUTE ? ptr[2] = MUTE_STATE_MUTE;
-			s == MUTE_STATE_ARMED_FOR_UNMUTE ? ptr[2] = MUTE_STATE_UNMUTE;
+			lptr = layerMemBase+layerMemSize*layer;
+			s = lptr[2];
+			s == MUTE_STATE_ARMED_FOR_MUTE ? lptr[2] = MUTE_STATE_MUTE;
+			s == MUTE_STATE_ARMED_FOR_UNMUTE ? lptr[2] = MUTE_STATE_UNMUTE;
 			layer+=1;
 		);
 	);
 );
 
+function onPlayStateChange(ps, old_ps) (
+	// 0=stopped, <0=error, 1=playing, 2=paused, 5=recording, 6=record paused
+	ps==5 && dumpMode ? (
+		dumpStart = quantize(beat_position+loopResolution-1, loopResolution);
+		dumpEnd = dumpStart+segmentLen;
+	);
+
+	dumpMode && play_state==5 && beat_position>right_beat_position ?(
+		dumpMode = 0;
+	);
+
+	(state==STATE_PLAY  || state==STATE_OVERDUB) && (ps==1 || ps==5) ? playRestarting = 1;
+);
+
+function slidersToVar() (
+	mapChannel=slider1;
+	loopQuantize=slider2;
+	noteQuantize=slider3;
+	remote = slider5;
+);
+// function moveToZero() (
+//      segmentEnd-=segmentStart;
+//      segmentStart=0;
+// );
+
+slidersToVar();
 loopResolution = getResolutionFromLabel(getLQLabel(loopQuantize));
-noteResolution = getResolutionFromLabel(getLQLabel(noteQuantize));
+noteResolution = getResolutionFromLabel(getNQLabel(noteQuantize));
 
 ui_setup(7000000);
 
 //==================================================================================================
 @slider
 //==================================================================================================
-mapChannel=slider1;
-loopQuantize=slider2;
-noteQuantize=slider3;
-remote = slider5;
+
+slidersToVar();
+
+//trigger & 1 ? moveToZero();
 
 //==================================================================================================
 @block
 //==================================================================================================
 
+play_state!=old_play_state ? (
+	onPlayStateChange(play_state, old_play_state);
+	old_play_state = play_state;
+);
 now = time_precise();
+bp = beat_position;
 rewind=0;
-beat_position<old_beat_position? rewind=1;
-old_beat_position = beat_position;
+bp<old_bp? (right_beat_position = old_bp; rewind=1;);
+old_bp = bp;
 
 state!=STATE_INITIAL ? (
-	relativePosition = beat_position-segmentStart;
+	relativePosition = bp-segmentStart;
 	segmentLen>0 ? relativePosition = mod(relativePosition, segmentLen);
 ) : relativePosition = -1;
-relativePosition<old_relativePosition ? rewind=1;
-old_relativePosition=relativePosition;
+// relativePosition<old_relativePosition ? rewind=1;
+// old_relativePosition=relativePosition;
 
 rewind?onRewind();
 midithru();
